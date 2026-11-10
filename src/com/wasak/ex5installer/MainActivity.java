@@ -22,11 +22,13 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -37,17 +39,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.KeyFactory;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.X509EncodedKeySpec;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -55,12 +48,19 @@ public class MainActivity extends Activity {
     private static final int PICK = 1;
     private EditText host, port;
     private CheckBox verifier;
-    private TextView picked, log;
-    private Button install;
+    private TextView picked, log, connStatus;
+    private View dot;
+    private Button install, connect, screen;
     private LinearLayout filesBox;
     private final List<Uri> files = new ArrayList<>();
     private SharedPreferences prefs;
-    private boolean busy;
+
+    // --- Connection state (single source of truth for render()) ---
+    private volatile Adb car;          // the held, reusable connection; null when disconnected
+    private boolean connecting;        // a connect attempt is in flight
+    private boolean busy;              // an install run is in flight
+    private String connMsg;            // transient connection status / error line; null = use default
+    private String carModel, carHost, carPort; // snapshot of the connected device for the status line
 
     @Override
     protected void onCreate(Bundle state) {
@@ -86,7 +86,31 @@ public class MainActivity extends Activity {
         addInner(connCard, host, Ui.S2);
         port = field("พอร์ต", prefs.getString("port", "5566"), InputType.TYPE_CLASS_NUMBER);
         addInner(connCard, port, Ui.S2);
-        addInner(connCard, Ui.subtitle(this, "รถต้องเปิด ADB ผ่าน Wi-Fi (adb tcpip) ไว้ พอร์ตปกติของ EX5 คือ 5566 ไม่รองรับรหัสจับคู่ของ Wireless debugging"), 0);
+        addInner(connCard, Ui.subtitle(this, "รถต้องเปิด ADB ผ่าน Wi-Fi (adb tcpip) ไว้ พอร์ตปกติของ EX5 คือ 5566 ไม่รองรับรหัสจับคู่ของ Wireless debugging"), Ui.S2);
+
+        // Connection state indicator: a small coloured dot + status text.
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        dot = new View(this);
+        GradientDrawable dotBg = new GradientDrawable();
+        dotBg.setShape(GradientDrawable.OVAL);
+        dotBg.setColor(Ui.TEXT_DIM);
+        dot.setBackground(dotBg);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(Ui.dp(this, 10), Ui.dp(this, 10));
+        dlp.rightMargin = Ui.dp(this, Ui.S2);
+        dot.setLayoutParams(dlp);
+        statusRow.addView(dot);
+        connStatus = new TextView(this);
+        connStatus.setTextSize(14);
+        connStatus.setTextColor(Ui.TEXT_DIM);
+        connStatus.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        statusRow.addView(connStatus);
+        addInner(connCard, statusRow, Ui.S2);
+
+        connect = new Button(this);
+        connect.setOnClickListener(v -> onConnectClick());
+        addInner(connCard, connect, 0);
         addRow(root, connCard, Ui.S3);
 
         // --- Card: ลงแอป ---
@@ -132,7 +156,7 @@ public class MainActivity extends Activity {
         // --- Card: ดูจอรถ ---
         LinearLayout screenCard = Ui.card(this);
         addInner(screenCard, Ui.label(this, "ดูจอรถ"), Ui.S2);
-        Button screen = new Button(this);
+        screen = new Button(this);
         screen.setText("ดูจอหลักของรถ (ควบคุมได้)");
         Ui.secondary(screen);
         screen.setOnClickListener(v -> {
@@ -164,6 +188,7 @@ public class MainActivity extends Activity {
         scroll.setBackgroundColor(Ui.BG);
         scroll.addView(root);
         setContentView(scroll);
+        render();
         take(getIntent());
     }
 
@@ -207,6 +232,7 @@ public class MainActivity extends Activity {
         if (files.isEmpty()) {
             picked.setVisibility(View.VISIBLE);
             picked.setText("ยังไม่ได้เลือกไฟล์");
+            render();
             return;
         }
         picked.setVisibility(View.GONE);
@@ -225,47 +251,169 @@ public class MainActivity extends Activity {
             filesBox.addView(chip);
             if (i < files.size() - 1) Ui.marginBottom(chip, Ui.S1);
         }
+        render();
+    }
+
+    /** Single state-update method: drives every enabled/alpha/text from the current state. UI thread only. */
+    private void render() {
+        boolean connected = car != null;
+
+        // Host/port are editable only while fully disconnected and idle.
+        boolean editable = !connected && !connecting && !busy;
+        host.setEnabled(editable);
+        port.setEnabled(editable);
+
+        // Connect / Disconnect button.
+        if (connecting) {
+            Ui.primary(connect);
+            connect.setText("กำลังเชื่อมต่อ...");
+            connect.setEnabled(false);
+        } else if (connected) {
+            Ui.secondary(connect);
+            connect.setText("ตัดการเชื่อมต่อ");
+            connect.setEnabled(!busy);
+        } else {
+            Ui.primary(connect);
+            connect.setText("เชื่อมต่อ");
+            connect.setEnabled(true);
+        }
+
+        // Connection status dot + line.
+        GradientDrawable dotBg = (GradientDrawable) dot.getBackground();
+        if (connecting) {
+            dotBg.setColor(Ui.WARN);
+            connStatus.setTextColor(Ui.TEXT_DIM);
+            connStatus.setText(connMsg != null ? connMsg : "กำลังเชื่อมต่อ...");
+        } else if (connected) {
+            dotBg.setColor(Ui.SUCCESS);
+            connStatus.setTextColor(Ui.TEXT);
+            connStatus.setText("เชื่อมต่อแล้ว: " + carModel + " (" + carHost + ":" + carPort + ")");
+        } else {
+            dotBg.setColor(connMsg != null ? Ui.DANGER : Ui.TEXT_DIM);
+            connStatus.setTextColor(connMsg != null ? Ui.DANGER : Ui.TEXT_DIM);
+            connStatus.setText(connMsg != null ? connMsg : "ยังไม่ได้เชื่อมต่อ");
+        }
+
+        // Gated actions: enabled and full-opacity only when connected and idle.
+        boolean actionable = connected && !busy && !connecting;
+        install.setEnabled(actionable);
+        install.setAlpha(connected ? 1f : 0.4f);
+        screen.setEnabled(actionable);
+        screen.setAlpha(connected ? 1f : 0.4f);
+    }
+
+    private void onConnectClick() {
+        if (car != null) {
+            disconnect();
+            return;
+        }
+        final String h = host.getText().toString().trim();
+        final String p = port.getText().toString().trim();
+        if (h.isEmpty()) {
+            connMsg = "ใส่ IP รถก่อน";
+            render();
+            return;
+        }
+        if (!p.matches("\\d+")) {
+            connMsg = "พอร์ตต้องเป็นตัวเลข";
+            render();
+            return;
+        }
+        prefs.edit().putString("host", h).putString("port", p).apply();
+        connecting = true;
+        connMsg = null;
+        render();
+        final int portNum = Integer.parseInt(p);
+        new Thread(() -> {
+            try {
+                Adb adb = Adb.connect(h, portNum, Keys.get(this),
+                        () -> runOnUiThread(() -> {
+                            connMsg = "รอกด Allow (อนุญาตการดีบัก) บนจอรถ...";
+                            render();
+                        }));
+                final String model = adb.model();
+                runOnUiThread(() -> {
+                    car = adb;
+                    carModel = model;
+                    carHost = h;
+                    carPort = p;
+                    connecting = false;
+                    connMsg = null;
+                    render();
+                });
+            } catch (Exception e) {
+                final String msg = e.getMessage();
+                runOnUiThread(() -> {
+                    connecting = false;
+                    connMsg = "เชื่อมต่อไม่ได้: " + msg;
+                    render();
+                });
+            }
+        }).start();
+    }
+
+    private void disconnect() {
+        final Adb old = car;
+        car = null;
+        carModel = carHost = carPort = null;
+        connMsg = null;
+        render();
+        if (old != null) new Thread(old::close).start();
     }
 
     private void start() {
-        String h = host.getText().toString().trim();
-        String p = port.getText().toString().trim();
-        if (h.isEmpty() || files.isEmpty()) {
-            log.setText("ใส่ IP รถ แล้วเลือกไฟล์ก่อน");
+        if (car == null) return; // gated by render(), guard anyway
+        if (files.isEmpty()) {
+            log.setText("เลือกไฟล์ก่อน");
             return;
         }
         boolean verifierOff = verifier.isChecked();
-        prefs.edit().putString("host", h).putString("port", p).putBoolean("verifier", verifierOff).apply();
+        prefs.edit().putBoolean("verifier", verifierOff).apply();
         busy = true;
-        install.setEnabled(false);
+        render();
         log.setText("");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         List<Uri> todo = new ArrayList<>(files);
+        final Adb adb = car;
         new Thread(() -> {
             int ok = 0;
-            try (Adb adb = Adb.connect(h, Integer.parseInt(p), Keys.get(this),
-                    () -> say("รอกด Allow (อนุญาตการดีบัก) บนจอรถ..."))) {
-                say("เชื่อมต่อแล้ว: " + adb.model());
-                for (Uri u : todo) {
-                    Installer.Source src = new Installer.Source() {
-                        public String name() { return MainActivity.this.name(u); }
-                        public InputStream open() throws IOException {
-                            InputStream in = getContentResolver().openInputStream(u);
-                            if (in == null) throw new IOException("เปิดไฟล์ไม่ได้");
-                            return in;
-                        }
-                    };
+            // One bad file (no read access, broken zip, install refused) must not stop the others
+            // or drop the connection: only a failed liveness probe means the car link is gone.
+            for (Uri u : todo) {
+                Installer.Source src = new Installer.Source() {
+                    public String name() { return MainActivity.this.name(u); }
+                    public InputStream open() throws IOException {
+                        InputStream in = getContentResolver().openInputStream(u);
+                        if (in == null) throw new IOException("เปิดไฟล์ไม่ได้");
+                        return in;
+                    }
+                };
+                try {
                     if (Installer.install(adb, src, verifierOff, this::say)) ok++;
+                } catch (Exception e) {
+                    say("ผิดพลาด: " + e.getMessage());
                 }
+            }
+            boolean linkDied;
+            try {
+                linkDied = !adb.exec("echo ok").trim().equals("ok");
             } catch (Exception e) {
-                say("ผิดพลาด: " + e.getMessage());
+                linkDied = true;
             }
             int done = ok;
+            boolean died = linkDied;
             runOnUiThread(() -> {
                 say("จบ: สำเร็จ " + done + "/" + todo.size());
                 busy = false;
-                install.setEnabled(true);
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (died) {
+                    say("การเชื่อมต่อหลุด กดเชื่อมต่อใหม่");
+                    car = null;
+                    carModel = carHost = carPort = null;
+                    connMsg = null;
+                    new Thread(adb::close).start();
+                }
+                render();
             });
         }).start();
     }
@@ -280,6 +428,14 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) { }
         String last = u.getLastPathSegment();
         return last != null ? last : u.toString();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        final Adb old = car;
+        car = null;
+        if (old != null) new Thread(old::close).start();
     }
 
     /** A styled dark input field. */

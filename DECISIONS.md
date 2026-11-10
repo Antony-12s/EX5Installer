@@ -8,3 +8,6 @@
 - 2026-11-10: Screen view = scrcpy 5.0.1 server (same jar as Geely Car Viewer, sha256 764eb6f7...). Video only plus touch control on display 0. Long side capped at 1280 (max_size): 2560 px crashed the decoder on the test phone.
 - Decoder time = our own frame counter, not device pts: the device pts made the phone codec abort (ubsan mul-overflow).
 - Adb is now multi-channel with a reader thread, so the screen stream and install run on one connection.
+- 2026-11-10 (1.2): Connect-first flow. The main screen holds one Adb connection (Connect / Disconnect); install and screen view stay disabled until connected; install reuses that connection. One failed file is logged and skipped; only a failed `echo ok` probe after the batch marks the link dead.
+- UI: shared dark theme in `Ui.java` (palette, spacing, button/field/card builders), app theme NoActionBar with dark system bars, mirror view immersive with the video centred. Built by subagents per file against the Ui.java contract; integrated and emulator-tested by the coordinator.
+- Phone test device: AVD `ex5i_phone` (Pixel 6, Android 14, 1080x2400, hw.keyboard=yes); car stand-in: `ex5_car` at 10.0.2.2:5561 from the phone emulator.
