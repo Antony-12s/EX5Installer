@@ -13,10 +13,14 @@ Plain TCP ADB only (`adb tcpip`). Android 11 wireless-debugging pairing codes ar
 Needs Android SDK build-tools 36.0.0, platform android-36 and JDK 21. No Gradle.
 
 ```
-sh build.sh            # unit tests + out/ex5-installer.apk (signed with ~/.android/debug.keystore)
+sh build.sh            # unit tests + out/ex5-installer.apk (release key if EX5I_KEYSTORE exists, else debug key)
 EX5_HOST=192.168.1.158 EX5_PORT=5566 sh test/run.sh                  # live: exec + push check
 EX5_HOST=... EX5_SCREEN=1 sh test/run.sh                             # live: screen stream check
 ```
+
+## License
+
+MIT (`LICENSE`), except the third-party file below.
 
 ## Third party
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Plain SDK build (no Gradle): aapt2 + javac + d8, signed with this PC's debug key.
+# Plain SDK build (no Gradle): aapt2 + javac + d8.
+# Signs with the release key when EX5I_KEYSTORE (+ adjacent .pass file) exists, else this PC's debug key.
 set -eu
 cd "$(dirname "$0")"
 SDK=${ANDROID_HOME:-$HOME/Android/Sdk}
@@ -14,7 +15,14 @@ sh test/run.sh
 "$BT/d8" --release --min-api 26 --lib "$JAR" --output out/dex $(find out/classes -name '*.class')
 (cd out/dex && zip -q ../unsigned.apk classes.dex)
 "$BT/zipalign" -f -p 4 out/unsigned.apk out/aligned.apk
-"$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android \
-    --out out/ex5-installer.apk out/aligned.apk
-"$BT/apksigner" verify out/ex5-installer.apk 2>/dev/null
+KEYSTORE=${EX5I_KEYSTORE:-/mnt/work/ex5installer-release-keystore/ex5installer-release.jks}
+if [ -f "$KEYSTORE" ] && [ -s "$KEYSTORE.pass" ]; then
+    "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "file:$KEYSTORE.pass" \
+        --out out/ex5-installer.apk out/aligned.apk
+else
+    echo "Release keystore not found: signing with the debug key (not for publishing)" >&2
+    "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android \
+        --out out/ex5-installer.apk out/aligned.apk
+fi
+"$BT/apksigner" verify --print-certs out/ex5-installer.apk 2>/dev/null | grep -m1 SHA-256
 ls -l out/ex5-installer.apk
