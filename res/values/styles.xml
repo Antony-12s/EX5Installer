@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Screens draw their own title; system bars match Ui.BG so nothing flashes grey. -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">#FF0E1116</item>
+        <item name="android:statusBarColor">#FF0E1116</item>
+        <item name="android:navigationBarColor">#FF0E1116</item>
+        <item name="android:colorAccent">#FF3B9DFF</item>
+    </style>
+</resources>

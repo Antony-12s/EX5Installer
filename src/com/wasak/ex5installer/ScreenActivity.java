@@ -18,17 +18,20 @@ package com.wasak.ex5installer;
 
 import android.app.Activity;
 import android.content.Context;
-import android.graphics.Color;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.AttributeSet;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -75,27 +78,79 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
     private byte[] config;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
+    /** Main-thread handler and the pending auto-hide task for the status pill. */
+    private Handler ui;
+    private Runnable hidePill;
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+
+        // No system title bar; sticky-immersive fullscreen so the whole screen is the car view.
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        goImmersive();
+
+        ui = new Handler(getMainLooper());
+
+        // Root: full-bleed themed background.
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(Ui.BG);
+
+        // Video: wrap-content + centre so the aspect-correct picture is letterboxed evenly,
+        // never dumped top-left. VideoView.onMeasure keeps the ratio; this just centres it.
         view = new VideoView(this, null);
         view.getHolder().addCallback(this);
-        root.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        vlp.gravity = Gravity.CENTER;
+        root.addView(view, vlp);
+
+        // Status pill: rounded translucent chip, top-centre, auto-hiding.
         status = new TextView(this);
-        status.setTextColor(Color.WHITE);
-        status.setBackgroundColor(0x88000000);
-        root.addView(status, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        status.setTextColor(Ui.TEXT);
+        status.setBackground(Ui.roundRect(this, 0xCC181D25, Ui.RADIUS_PILL, 0));
+        int px = Ui.dp(this, Ui.S3), py = Ui.dp(this, Ui.S2);
+        status.setPadding(px, py, px, py);
+        status.setVisibility(View.GONE);
+        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        slp.topMargin = Ui.dp(this, Ui.S4);
+        root.addView(status, slp);
+
+        // Control bar: a single small translucent close pill, bottom-centre, above the video.
         Button close = new Button(this);
         close.setText("ปิด");
+        Ui.overlayPill(close);
         close.setOnClickListener(v -> finish());
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.END;
-        root.addView(close, lp);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        clp.bottomMargin = Ui.dp(this, Ui.S4);
+        root.addView(close, clp);
+
         setContentView(root);
 
         view.setOnTouchListener(this::touched);
+    }
+
+    /** Hide the system bars, sticky so a swipe only reveals them briefly. */
+    private void goImmersive() {
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) goImmersive();
     }
 
     private boolean touched(View v, MotionEvent e) {
@@ -235,14 +290,49 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
     private void closeAdb() {
         Scrcpy s = scrcpy;
         scrcpy = null;
-        io.submit(() -> {
+        Adb a = adb;
+        Runnable close = () -> {
             if (s != null) s.close();
-            if (adb != null) adb.close();
-        });
+            if (a != null) a.close();
+        };
+        // The stream can end after onDestroy shut the executor down: close on a plain thread then.
+        try {
+            io.submit(close);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            new Thread(close, "screen-close").start();
+        }
     }
 
+    /**
+     * Updates the status pill from any thread. Normal/progress messages fade out after ~3s;
+     * sticky messages (errors, drops, still-connecting) stay until the next say().
+     */
     private void say(String text) {
-        runOnUiThread(() -> status.setText(text));
+        runOnUiThread(() -> showPill(text));
+    }
+
+    /** Must run on the UI thread. Guards against being called before views exist. */
+    private void showPill(String text) {
+        if (status == null) return;
+        status.setText(text);
+        status.setVisibility(View.VISIBLE);
+        status.setAlpha(1f);
+        if (ui != null) {
+            if (hidePill != null) ui.removeCallbacks(hidePill);
+            if (!isSticky(text)) {
+                hidePill = () -> {
+                    if (status != null) status.setVisibility(View.GONE);
+                };
+                ui.postDelayed(hidePill, 3000);
+            }
+        }
+    }
+
+    /** Errors / drops / in-progress states keep the pill on screen. */
+    private boolean isSticky(String text) {
+        if (text == null) return false;
+        return text.contains("ต่อไม่ได้") || text.contains("ผิดพลาด") || text.contains("หลุด")
+                || text.contains("พัง") || text.contains("กำลังต่อ") || text.contains("รอกด");
     }
 
     @Override

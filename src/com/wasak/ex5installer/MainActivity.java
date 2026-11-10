@@ -26,6 +26,9 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.text.InputType;
+import android.text.TextUtils;
+import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -54,6 +57,7 @@ public class MainActivity extends Activity {
     private CheckBox verifier;
     private TextView picked, log;
     private Button install;
+    private LinearLayout filesBox;
     private final List<Uri> files = new ArrayList<>();
     private SharedPreferences prefs;
     private boolean busy;
@@ -62,62 +66,102 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("main", MODE_PRIVATE);
-        int pad = dp(16);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
+        int pad = Ui.dp(this, Ui.S4);
         root.setPadding(pad, pad, pad, pad);
 
-        TextView title = new TextView(this);
-        title.setText("EX5 Installer");
-        title.setTextSize(24);
-        root.addView(title);
-        TextView hint = new TextView(this);
-        hint.setText("ลงแอปเข้ารถผ่าน Wireless ADB (มือถือกับรถต้องอยู่ Wi-Fi เดียวกัน)");
-        root.addView(hint);
+        // --- Header ---
+        TextView title = Ui.title(this, "EX5 Installer");
+        addRow(root, title, Ui.S1);
+        TextView hint = Ui.subtitle(this, "ลงแอปเข้ารถผ่าน Wireless ADB — มือถือกับรถต้องอยู่ Wi-Fi เดียวกัน");
+        addRow(root, hint, Ui.S4);
 
-        host = field("IP รถ เช่น 192.168.1.158", prefs.getString("host", ""), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        // --- Card: การเชื่อมต่อ ---
+        LinearLayout connCard = Ui.card(this);
+        addInner(connCard, Ui.label(this, "การเชื่อมต่อ"), Ui.S2);
+        host = field("IP รถ เช่น 192.168.1.158", prefs.getString("host", ""),
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        addInner(connCard, host, Ui.S2);
         port = field("พอร์ต", prefs.getString("port", "5566"), InputType.TYPE_CLASS_NUMBER);
-        root.addView(host);
-        root.addView(port);
+        addInner(connCard, port, Ui.S2);
+        addInner(connCard, Ui.subtitle(this, "รถต้องเปิด ADB ผ่าน Wi-Fi (adb tcpip) ไว้ พอร์ตปกติของ EX5 คือ 5566 ไม่รองรับรหัสจับคู่ของ Wireless debugging"), 0);
+        addRow(root, connCard, Ui.S3);
 
-        verifier = new CheckBox(this);
-        verifier.setText("ปิดตัวตรวจติดตั้งของ EX5 1.3 ชั่วคราว (คืนค่าเองหลังลงเสร็จ)");
-        verifier.setChecked(prefs.getBoolean("verifier", true));
-        root.addView(verifier);
+        // --- Card: ลงแอป ---
+        LinearLayout installCard = Ui.card(this);
+        addInner(installCard, Ui.label(this, "ลงแอป"), Ui.S2);
 
         Button pick = new Button(this);
         pick.setText("เลือกไฟล์ APK / APKM / APKS / XAPK");
+        Ui.secondary(pick);
         pick.setOnClickListener(v -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
                     .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
             startActivityForResult(i, PICK);
         });
-        root.addView(pick);
+        addInner(installCard, pick, Ui.S2);
+
+        filesBox = new LinearLayout(this);
+        filesBox.setOrientation(LinearLayout.VERTICAL);
+        filesBox.setBackground(Ui.roundRect(this, Ui.CARD_HI, Ui.RADIUS_SM, Ui.BORDER));
+        int fp = Ui.dp(this, Ui.S2);
+        filesBox.setPadding(fp, fp, fp, fp);
+        filesBox.setMinimumHeight(Ui.dp(this, 56));
         picked = new TextView(this);
-        root.addView(picked);
+        picked.setText("ยังไม่ได้เลือกไฟล์");
+        picked.setTextColor(Ui.TEXT_DIM);
+        picked.setTextSize(14);
+        filesBox.addView(picked);
+        addInner(installCard, filesBox, Ui.S2);
+
+        verifier = new CheckBox(this);
+        verifier.setText("ปิดตัวตรวจติดตั้งของ EX5 1.3 ชั่วคราว (คืนค่าเองหลังลงเสร็จ)");
+        Ui.styleToggle(verifier);
+        verifier.setChecked(prefs.getBoolean("verifier", true));
+        addInner(installCard, verifier, Ui.S2);
 
         install = new Button(this);
         install.setText("ลงแอปในรถ");
+        Ui.primary(install);
         install.setOnClickListener(v -> start());
-        root.addView(install);
+        addInner(installCard, install, 0);
+        addRow(root, installCard, Ui.S3);
 
+        // --- Card: ดูจอรถ ---
+        LinearLayout screenCard = Ui.card(this);
+        addInner(screenCard, Ui.label(this, "ดูจอรถ"), Ui.S2);
         Button screen = new Button(this);
         screen.setText("ดูจอหลักของรถ (ควบคุมได้)");
+        Ui.secondary(screen);
         screen.setOnClickListener(v -> {
             Intent i = new Intent(this, ScreenActivity.class)
                     .putExtra(ScreenActivity.EXTRA_HOST, host.getText().toString().trim())
                     .putExtra(ScreenActivity.EXTRA_PORT, Integer.parseInt(port.getText().toString().trim()));
             startActivity(i);
         });
-        root.addView(screen);
+        addInner(screenCard, screen, 0);
+        addRow(root, screenCard, Ui.S3);
 
+        // --- Card: สถานะ ---
+        LinearLayout statusCard = Ui.card(this);
+        addInner(statusCard, Ui.label(this, "สถานะ"), Ui.S2);
         log = new TextView(this);
         log.setTypeface(Typeface.MONOSPACE);
         log.setTextIsSelectable(true);
-        root.addView(log);
+        log.setTextColor(Ui.TEXT);
+        log.setTextSize(13);
+        log.setBackground(Ui.roundRect(this, Ui.CARD_HI, Ui.RADIUS_SM, Ui.BORDER));
+        int lp = Ui.dp(this, Ui.S3);
+        log.setPadding(lp, lp, lp, lp);
+        log.setMinHeight(Ui.dp(this, 120));
+        addInner(statusCard, log, 0);
+        addRow(root, statusCard, 0);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFitsSystemWindows(true);
+        scroll.setBackgroundColor(Ui.BG);
         scroll.addView(root);
         setContentView(scroll);
         take(getIntent());
@@ -134,13 +178,13 @@ public class MainActivity extends Activity {
         if (intent == null || busy) return;
         List<Uri> uris = new ArrayList<>();
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) uris.add(intent.getData());
-        if (Intent.ACTION_SEND.equals(intent.getAction())) {
-            Uri u = intent.getParcelableExtra(Intent.EXTRA_STREAM);
-            if (u != null) uris.add(u);
-        }
-        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
-            ArrayList<Uri> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
-            if (list != null) uris.addAll(list);
+        // Any app can send to this exported activity: keep only real Uris, a wrong extra type must not crash.
+        Object one = intent.getExtras() == null ? null : intent.getExtras().get(Intent.EXTRA_STREAM);
+        if (Intent.ACTION_SEND.equals(intent.getAction()) && one instanceof Uri) uris.add((Uri) one);
+        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction()) && one instanceof java.util.List) {
+            for (Object item : (java.util.List<?>) one) {
+                if (item instanceof Uri) uris.add((Uri) item);
+            }
         }
         if (!uris.isEmpty()) setFiles(uris);
     }
@@ -158,9 +202,29 @@ public class MainActivity extends Activity {
     private void setFiles(List<Uri> uris) {
         files.clear();
         files.addAll(uris);
-        StringBuilder s = new StringBuilder();
-        for (Uri u : files) s.append("• ").append(name(u)).append('\n');
-        picked.setText(s.toString().trim());
+        // Keep picked (the empty-state label) at index 0; drop any previous chips.
+        if (filesBox.getChildCount() > 1) filesBox.removeViews(1, filesBox.getChildCount() - 1);
+        if (files.isEmpty()) {
+            picked.setVisibility(View.VISIBLE);
+            picked.setText("ยังไม่ได้เลือกไฟล์");
+            return;
+        }
+        picked.setVisibility(View.GONE);
+        for (int i = 0; i < files.size(); i++) {
+            TextView chip = new TextView(this);
+            chip.setText(name(files.get(i)));
+            chip.setTextColor(Ui.TEXT);
+            chip.setTextSize(14);
+            chip.setSingleLine(true);
+            chip.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            chip.setBackground(Ui.roundRect(this, Ui.CARD, Ui.RADIUS_SM, Ui.BORDER));
+            int cp = Ui.dp(this, Ui.S2);
+            chip.setPadding(cp, cp, cp, cp);
+            chip.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            filesBox.addView(chip);
+            if (i < files.size() - 1) Ui.marginBottom(chip, Ui.S1);
+        }
     }
 
     private void start() {
@@ -218,16 +282,30 @@ public class MainActivity extends Activity {
         return last != null ? last : u.toString();
     }
 
+    /** A styled dark input field. */
     private EditText field(String hint, String value, int type) {
         EditText e = new EditText(this);
         e.setHint(hint);
         e.setText(value);
         e.setInputType(type);
         e.setSingleLine(true);
+        Ui.styleField(e);
         return e;
     }
 
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+    /** Add a full-width child to the root column with a bottom margin. */
+    private void addRow(LinearLayout parent, View v, int marginDp) {
+        v.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        parent.addView(v);
+        if (marginDp > 0) Ui.marginBottom(v, marginDp);
+    }
+
+    /** Add a full-width child inside a card with a bottom margin. */
+    private void addInner(LinearLayout card, View v, int marginDp) {
+        v.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(v);
+        if (marginDp > 0) Ui.marginBottom(v, marginDp);
     }
 }
