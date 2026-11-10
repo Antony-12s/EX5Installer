@@ -85,6 +85,16 @@ public class MainActivity extends Activity {
         install.setOnClickListener(v -> start());
         root.addView(install);
 
+        Button screen = new Button(this);
+        screen.setText("ดูจอหลักของรถ (ควบคุมได้)");
+        screen.setOnClickListener(v -> {
+            Intent i = new Intent(this, ScreenActivity.class)
+                    .putExtra(ScreenActivity.EXTRA_HOST, host.getText().toString().trim())
+                    .putExtra(ScreenActivity.EXTRA_PORT, Integer.parseInt(port.getText().toString().trim()));
+            startActivity(i);
+        });
+        root.addView(screen);
+
         log = new TextView(this);
         log.setTypeface(Typeface.MONOSPACE);
         log.setTextIsSelectable(true);
@@ -153,7 +163,7 @@ public class MainActivity extends Activity {
         List<Uri> todo = new ArrayList<>(files);
         new Thread(() -> {
             int ok = 0;
-            try (Adb adb = Adb.connect(h, Integer.parseInt(p), key(),
+            try (Adb adb = Adb.connect(h, Integer.parseInt(p), Keys.get(this),
                     () -> say("รอกด Allow (อนุญาตการดีบัก) บนจอรถ..."))) {
                 say("เชื่อมต่อแล้ว: " + adb.model());
                 for (Uri u : todo) {
@@ -182,22 +192,6 @@ public class MainActivity extends Activity {
 
     private void say(String line) {
         runOnUiThread(() -> log.append(line + "\n"));
-    }
-
-    /** Our adb RSA key, made once and kept in app storage (the car remembers it after the first Allow). */
-    private KeyPair key() throws Exception {
-        File pri = new File(getFilesDir(), "adbkey"), pub = new File(getFilesDir(), "adbkey.pub");
-        KeyFactory kf = KeyFactory.getInstance("RSA");
-        if (pri.exists() && pub.exists()) {
-            return new KeyPair(kf.generatePublic(new X509EncodedKeySpec(Files.readAllBytes(pub.toPath()))),
-                    kf.generatePrivate(new PKCS8EncodedKeySpec(Files.readAllBytes(pri.toPath()))));
-        }
-        KeyPairGenerator g = KeyPairGenerator.getInstance("RSA");
-        g.initialize(2048);
-        KeyPair k = g.generateKeyPair();
-        try (FileOutputStream o = new FileOutputStream(pri)) { o.write(k.getPrivate().getEncoded()); }
-        try (FileOutputStream o = new FileOutputStream(pub)) { o.write(k.getPublic().getEncoded()); }
-        return k;
     }
 
     private String name(Uri u) {

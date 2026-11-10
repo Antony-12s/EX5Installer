@@ -4,3 +4,6 @@
 - Firmware 1.3 install verifier: the on-device script saves `verifier_verify_adb_installs`, sets 0, restores in an EXIT trap (same semantics as HUD `Updater.VERIFIER_OFF`). Checkbox on by default; the user taps Install each time.
 - The install script runs detached on the car (`setsid -d`), so a dropped phone link cannot stop it between disable and restore. Phone polls `/data/local/tmp/ex5i.log` for END.
 - Signed with this PC's debug key for now; switch to a dedicated release key before sharing with other owners (key change breaks updates).
+- 2026-11-10: Screen view = scrcpy 5.0.1 server (same jar as Geely Car Viewer, sha256 764eb6f7...). Video only plus touch control on display 0. Long side capped at 1280 (max_size): 2560 px crashed the decoder on the test phone.
+- Decoder time = our own frame counter, not device pts: the device pts made the phone codec abort (ubsan mul-overflow).
+- Adb is now multi-channel with a reader thread, so the screen stream and install run on one connection.

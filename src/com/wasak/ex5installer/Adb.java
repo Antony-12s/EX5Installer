@@ -17,10 +17,18 @@ import java.security.KeyPair;
 import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongConsumer;
 
 /**
- * Minimal ADB client over plain TCP (the `adb tcpip` / `<ip>:5566` transport, not Android 11 TLS pairing).
- * One stream at a time: exec (raw shell, no pty) and sync push. Pure Java so it also runs on the PC for tests.
+ * Minimal ADB client over plain TCP (`adb tcpip` / `<ip>:5566`, not Android 11 TLS pairing).
+ * One TCP connection carries many channels (exec, sync, shell, localabstract:...). A reader thread
+ * demuxes packets into per-channel queues, so a long-running channel never blocks the others.
  */
 public final class Adb implements Closeable {
     static final int CNXN = 0x4e584e43, AUTH = 0x48545541, OPEN = 0x4e45504f, OKAY = 0x59414b4f,
@@ -28,12 +36,18 @@ public final class Adb implements Closeable {
     static final int AUTH_TOKEN = 1, AUTH_SIGNATURE = 2, AUTH_RSAPUBLICKEY = 3;
     // DigestInfo header for SHA-1: adbd verifies the token as if it were a SHA-1 digest.
     private static final byte[] SHA1_PREFIX = {0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14};
+    private static final byte[] EMPTY = new byte[0];
+    private static final byte[] EOF = new byte[0];
+    private static final int MAX_PAYLOAD = 1024 * 1024;
 
     private final Socket socket;
     private final DataInputStream in;
     private final OutputStream out;
+    private final Object writeLock = new Object();
+    private final Map<Integer, Channel> channels = new ConcurrentHashMap<>();
+    private final AtomicInteger nextId = new AtomicInteger(1);
+    private volatile boolean dead;
     private int maxData = 4096;
-    private int nextId = 1;
     public String banner = "";
 
     private Adb(Socket socket) throws IOException {
@@ -55,6 +69,10 @@ public final class Adb implements Closeable {
             adb.close();
             throw e;
         }
+        s.setSoTimeout(0);
+        Thread reader = new Thread(adb::readLoop, "adb-reader");
+        reader.setDaemon(true);
+        reader.start();
         return adb;
     }
 
@@ -119,45 +137,61 @@ public final class Adb implements Closeable {
 
     /** Runs a shell command (no pty) and returns everything it printed. */
     public String exec(String cmd) throws IOException {
-        Stream st = open("exec:" + cmd);
-        while (!st.closed) pump(st);
-        return st.inbox.toString("UTF-8");
+        Channel c = open("exec:" + cmd);
+        try {
+            return new String(c.readAll(), StandardCharsets.UTF_8);
+        } finally {
+            c.close();
+        }
     }
 
     /** Pushes src to remotePath with the sync protocol; returns bytes sent. Does not close src. */
-    public long push(InputStream src, String remotePath, java.util.function.LongConsumer progress) throws IOException {
-        Stream st = open("sync:");
-        byte[] path = (remotePath + ",33188").getBytes(StandardCharsets.UTF_8); // 0100644
-        ByteArrayOutputStream pending = new ByteArrayOutputStream();
-        syncHeader(pending, "SEND", path.length);
-        pending.write(path);
-        byte[] buf = new byte[64 * 1024]; // SYNC_DATA_MAX
-        long total = 0;
-        int n;
-        while ((n = readFully(src, buf)) > 0) {
-            syncHeader(pending, "DATA", n);
-            pending.write(buf, 0, n);
-            write(st, pending.toByteArray());
-            pending.reset();
-            total += n;
-            if (progress != null) progress.accept(total);
+    public long push(InputStream src, String remotePath, LongConsumer progress) throws IOException {
+        Channel c = open("sync:");
+        try {
+            byte[] path = (remotePath + ",33188").getBytes(StandardCharsets.UTF_8); // 0100644
+            ByteArrayOutputStream head = new ByteArrayOutputStream();
+            syncHeader(head, "SEND", path.length);
+            head.write(path);
+            c.write(head.toByteArray());
+            byte[] buf = new byte[64 * 1024]; // SYNC_DATA_MAX
+            long total = 0;
+            int n;
+            while ((n = readFully(src, buf)) > 0) {
+                ByteArrayOutputStream pkt = new ByteArrayOutputStream(n + 8);
+                syncHeader(pkt, "DATA", n);
+                pkt.write(buf, 0, n);
+                c.write(pkt.toByteArray());
+                total += n;
+                if (progress != null) progress.accept(total);
+            }
+            ByteArrayOutputStream done = new ByteArrayOutputStream();
+            syncHeader(done, "DONE", (int) (System.currentTimeMillis() / 1000));
+            c.write(done.toByteArray());
+            byte[] reply = c.readExact(8, 120_000);
+            if (!"OKAY".equals(new String(reply, 0, 4, StandardCharsets.US_ASCII))) {
+                byte[] msg = c.readExact(le32(reply, 4), 120_000);
+                throw new IOException("push " + remotePath + " failed: " + new String(msg, StandardCharsets.UTF_8));
+            }
+            return total;
+        } finally {
+            c.close();
         }
-        syncHeader(pending, "DONE", (int) (System.currentTimeMillis() / 1000));
-        write(st, pending.toByteArray());
-        while (st.inbox.size() < 8 && !st.closed) pump(st);
-        byte[] reply = st.inbox.toByteArray();
-        String id = reply.length >= 4 ? new String(reply, 0, 4, StandardCharsets.US_ASCII) : "";
-        if (!id.equals("OKAY")) {
-            while (!st.closed && st.inbox.size() < 8 + le32(reply, 4)) pump(st);
-            reply = st.inbox.toByteArray();
-            String why = reply.length > 8 ? new String(reply, 8, reply.length - 8, StandardCharsets.UTF_8) : "connection closed";
-            throw new IOException("push " + remotePath + " failed: " + why);
+    }
+
+    /** Opens a channel to a service such as "shell:...", "sync:" or "localabstract:name". */
+    public Channel open(String destination) throws IOException {
+        if (dead) throw new IOException("adb connection closed");
+        Channel c = new Channel(nextId.getAndIncrement());
+        channels.put(c.local, c);
+        send(OPEN, c.local, 0, (destination + "\0").getBytes(StandardCharsets.UTF_8));
+        try {
+            c.awaitOkay();
+        } catch (IOException e) {
+            channels.remove(c.local);
+            throw new IOException("open failed: " + destination + " (" + e.getMessage() + ")", e);
         }
-        pending.reset();
-        syncHeader(pending, "QUIT", 0);
-        write(st, pending.toByteArray());
-        closeStream(st);
-        return total;
+        return c;
     }
 
     private static int readFully(InputStream src, byte[] buf) throws IOException {
@@ -180,63 +214,150 @@ public final class Adb implements Closeable {
         return (b[off] & 0xff) | (b[off + 1] & 0xff) << 8 | (b[off + 2] & 0xff) << 16 | (b[off + 3] & 0xff) << 24;
     }
 
-    // ---- streams ----
-
-    private static final class Stream {
+    /** One logical stream on the shared connection. */
+    public final class Channel implements Closeable {
         final int local;
-        int remote;
-        boolean closed, okay;
-        final ByteArrayOutputStream inbox = new ByteArrayOutputStream();
-        Stream(int local) { this.local = local; }
-    }
+        private volatile int remote;
+        private volatile boolean closed;
+        private final LinkedBlockingQueue<byte[]> inbox = new LinkedBlockingQueue<>();
+        private final Semaphore okay = new Semaphore(0);
+        private byte[] pending = EMPTY;
+        private int pendingAt;
 
-    private Stream open(String dest) throws IOException {
-        Stream st = new Stream(nextId++);
-        send(OPEN, st.local, 0, (dest + "\0").getBytes(StandardCharsets.UTF_8));
-        while (st.remote == 0) {
-            if (st.closed) throw new IOException("device refused " + dest);
-            pump(st);
+        Channel(int local) {
+            this.local = local;
         }
-        return st;
-    }
 
-    private void write(Stream st, byte[] data) throws IOException {
-        for (int off = 0; off < data.length; off += maxData) {
-            int len = Math.min(maxData, data.length - off);
-            byte[] chunk = new byte[len];
-            System.arraycopy(data, off, chunk, 0, len);
-            st.okay = false;
-            send(WRTE, st.local, st.remote, chunk);
-            while (!st.okay) {
-                if (st.closed) throw new IOException("stream closed by device");
-                pump(st);
+        void deliver(byte[] data) {
+            if (data.length > 0 && !closed) inbox.add(data);
+        }
+
+        void acknowledge(int remoteId) {
+            remote = remoteId;
+            okay.release();
+        }
+
+        void remoteClosed() {
+            closed = true;
+            inbox.add(EOF);
+            okay.release();
+        }
+
+        void awaitOkay() throws IOException {
+            try {
+                if (!okay.tryAcquire(30, TimeUnit.SECONDS)) throw new IOException("device did not answer");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted");
+            }
+            if (closed) throw new IOException("stream closed by device");
+        }
+
+        /** Sends data, split to the device's max packet size; each packet waits for the device's OKAY. */
+        public synchronized void write(byte[] data) throws IOException {
+            for (int off = 0; off < data.length; off += maxData) {
+                int len = Math.min(maxData, data.length - off);
+                byte[] chunk = new byte[len];
+                System.arraycopy(data, off, chunk, 0, len);
+                if (closed) throw new IOException("stream closed");
+                send(WRTE, local, remote, chunk);
+                awaitOkay();
             }
         }
-    }
 
-    private void closeStream(Stream st) throws IOException {
-        if (!st.closed) send(CLSE, st.local, st.remote, new byte[0]);
-        st.closed = true;
-    }
-
-    /** Reads one packet and applies it to st; packets for older streams are acknowledged and dropped. */
-    private void pump(Stream st) throws IOException {
-        Msg m = read();
-        boolean mine = m.arg1 == st.local;
-        switch (m.cmd) {
-            case OKAY:
-                if (mine) { st.remote = m.arg0; st.okay = true; }
-                break;
-            case WRTE:
-                send(OKAY, m.arg1, m.arg0, new byte[0]);
-                if (mine) st.inbox.write(m.data);
-                break;
-            case CLSE:
-                if (mine) st.closed = true;
-                break;
-            default:
-                break;
+        /** Next chunk, or null once the device closed the stream. */
+        public byte[] next(long timeoutMs) throws IOException {
+            try {
+                byte[] d = inbox.poll(timeoutMs, TimeUnit.MILLISECONDS);
+                if (d == null) throw new IOException("timeout");
+                if (d == EOF) {
+                    inbox.add(EOF); // keep it for the next reader
+                    return null;
+                }
+                return d;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted");
+            }
         }
+
+        public byte[] readExact(int n, long timeoutMs) throws IOException {
+            byte[] result = new byte[n];
+            int got = 0;
+            while (got < n) {
+                if (pendingAt == pending.length) {
+                    byte[] d = next(timeoutMs);
+                    if (d == null) throw new IOException("stream closed");
+                    pending = d;
+                    pendingAt = 0;
+                }
+                int take = Math.min(n - got, pending.length - pendingAt);
+                System.arraycopy(pending, pendingAt, result, got, take);
+                pendingAt += take;
+                got += take;
+            }
+            return result;
+        }
+
+        public byte[] readAll() throws IOException {
+            ByteArrayOutputStream o = new ByteArrayOutputStream();
+            o.write(pending, pendingAt, pending.length - pendingAt);
+            pendingAt = pending.length;
+            byte[] d;
+            while ((d = next(120_000)) != null) o.write(d);
+            return o.toByteArray();
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                try {
+                    if (!dead) send(CLSE, local, remote, EMPTY);
+                } catch (IOException ignored) {
+                    // connection already gone
+                }
+            }
+            channels.remove(local);
+            inbox.add(EOF);
+            okay.release();
+        }
+    }
+
+    /** Demuxes packets into channels until the socket dies. */
+    private void readLoop() {
+        try {
+            while (true) {
+                Msg m = read();
+                Channel c = channels.get(m.arg1);
+                switch (m.cmd) {
+                    case OKAY:
+                        if (c != null) c.acknowledge(m.arg0);
+                        break;
+                    case WRTE:
+                        if (c != null) {
+                            c.deliver(m.data);
+                            send(OKAY, c.local, m.arg0, EMPTY);
+                        } else {
+                            send(CLSE, m.arg1, m.arg0, EMPTY);
+                        }
+                        break;
+                    case CLSE:
+                        if (c != null) {
+                            channels.remove(m.arg1);
+                            c.remoteClosed();
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            }
+        } catch (Exception e) {
+            // socket closed or broken: every channel ends below
+        }
+        dead = true;
+        for (Channel c : channels.values()) c.remoteClosed();
+        channels.clear();
     }
 
     // ---- packets ----
@@ -251,9 +372,11 @@ public final class Adb implements Closeable {
         int sum = 0;
         for (byte x : data) sum += x & 0xff;
         h.putInt(cmd).putInt(arg0).putInt(arg1).putInt(data.length).putInt(sum).putInt(~cmd);
-        out.write(h.array());
-        out.write(data);
-        out.flush();
+        synchronized (writeLock) {
+            out.write(h.array());
+            out.write(data);
+            out.flush();
+        }
     }
 
     private Msg read() throws IOException {
@@ -269,7 +392,7 @@ public final class Adb implements Closeable {
         m.arg0 = h.getInt();
         m.arg1 = h.getInt();
         int len = h.getInt();
-        if (len < 0 || len > 1024 * 1024) throw new IOException("bad packet length " + len);
+        if (len < 0 || len > MAX_PAYLOAD) throw new IOException("bad packet length " + len);
         m.data = new byte[len];
         in.readFully(m.data);
         return m;
@@ -277,6 +400,11 @@ public final class Adb implements Closeable {
 
     @Override
     public void close() {
-        try { socket.close(); } catch (IOException ignored) { }
+        dead = true;
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+            // already closed
+        }
     }
 }

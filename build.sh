@@ -9,7 +9,7 @@ JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64}
 rm -rf out && mkdir -p out/res out/classes out/dex
 sh test/run.sh
 "$BT/aapt2" compile --dir res -o out/res.zip
-"$BT/aapt2" link -I "$JAR" --manifest AndroidManifest.xml -o out/unsigned.apk out/res.zip
+"$BT/aapt2" link -I "$JAR" --manifest AndroidManifest.xml -A assets -o out/unsigned.apk out/res.zip
 "$JAVA_HOME/bin/javac" -nowarn --release 11 -cp "$JAR" -d out/classes $(find src -name '*.java')
 "$BT/d8" --release --min-api 26 --lib "$JAR" --output out/dex $(find out/classes -name '*.class')
 (cd out/dex && zip -q ../unsigned.apk classes.dex)

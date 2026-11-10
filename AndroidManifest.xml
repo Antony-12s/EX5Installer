@@ -26,5 +26,7 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <activity android:name=".ScreenActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>
