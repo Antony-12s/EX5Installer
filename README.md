@@ -20,7 +20,8 @@ EX5_HOST=... EX5_SCREEN=1 sh test/run.sh                             # live: scr
 
 ## License
 
-MIT (`LICENSE`), except the third-party file below.
+GNU General Public License v3.0 (`LICENSE`), except the third-party file below.
+A modified build you distribute must also be GPLv3 and ship its source.
 
 ## Third party
 
