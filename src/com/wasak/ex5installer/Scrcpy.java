@@ -25,7 +25,7 @@ import java.util.Random;
 
 /**
  * scrcpy 5.0.1 client over the Adb channels (mirrors ex5viewer/scrcpy.py, which runs on the car).
- * Video: one H.264 stream of one display. Control: INJECT_TOUCH_EVENT only. No port forward:
+ * Video: one H.264 stream of one display. Control: INJECT_TOUCH_EVENT and INJECT_KEYCODE. No port forward:
  * the server's localabstract socket is opened as an adb channel directly.
  */
 public final class Scrcpy implements Closeable {
@@ -35,6 +35,8 @@ public final class Scrcpy implements Closeable {
     static final long PTS_MASK = CONFIG_FLAG - 1;
     static final long POINTER_FINGER = 0xFFFFFFFFFFFFFFFEL; // generic finger (-2): a touch, not a mouse
     public static final int TOUCH_DOWN = 0, TOUCH_UP = 1, TOUCH_MOVE = 2;
+    public static final int KEY_HOME = 3, KEY_BACK = 4; // Android KeyEvent codes
+    static final int KEY_DOWN = 0, KEY_UP = 1;
     // Longest side sent to the phone: smaller frames fit Wi-Fi and cheap hardware decoders (2560 px crashed one).
     static final int MAX_SIZE = 1280;
 
@@ -193,6 +195,25 @@ public final class Scrcpy implements Closeable {
         } catch (IOException ignored) {
             // link dropped; the reader reports the end
         }
+    }
+
+    /** Presses and releases one Android key (KEY_HOME, KEY_BACK). Dropped while control is off. */
+    public void key(int keycode) {
+        Adb.Channel c = control;
+        if (c == null || width == 0) return;
+        try {
+            c.write(keyMessage(KEY_DOWN, keycode));
+            c.write(keyMessage(KEY_UP, keycode));
+        } catch (IOException ignored) {
+            // link dropped; the reader reports the end
+        }
+    }
+
+    /** INJECT_KEYCODE, 14 bytes big-endian: type 0, action, keycode, repeat 0, metastate 0. */
+    static byte[] keyMessage(int action, int keycode) {
+        ByteBuffer b = ByteBuffer.allocate(14);
+        b.put((byte) 0).put((byte) action).putInt(keycode).putInt(0).putInt(0);
+        return b.array();
     }
 
     static float clamp(float v) {

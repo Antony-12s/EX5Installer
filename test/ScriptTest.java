@@ -29,6 +29,7 @@ public class ScriptTest {
 
         bundleTest();
         keyTest();
+        scrcpyMessageTest();
         System.out.println(fails == 0 ? "ScriptTest: all passed" : "ScriptTest: " + fails + " FAILED");
         if (fails > 0) System.exit(1);
     }
@@ -143,6 +144,33 @@ public class ScriptTest {
         System.arraycopy(token, 0, want, 15, 20);
         if (sig.length != 256 || !java.util.Arrays.equals(plain, want)) fail("auth signature not PKCS1 SHA-1 DigestInfo");
         else System.out.println("ok  auth signature");
+    }
+
+    /** scrcpy control messages, big-endian as in scrcpy app/tests/test_control_msg_serialize.c. */
+    static void scrcpyMessageTest() throws Exception {
+        Class<?> sc = Class.forName("com.wasak.ex5installer.Scrcpy");
+        var key = sc.getDeclaredMethod("keyMessage", int.class, int.class);
+        key.setAccessible(true);
+        byte[] down = (byte[]) key.invoke(null, 0, 3);
+        byte[] up = (byte[]) key.invoke(null, 1, 4);
+        if (!Arrays.equals(down, new byte[]{0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0})) fail("keyMessage(0,3): " + Arrays.toString(down));
+        else System.out.println("ok  key message down HOME");
+        if (!Arrays.equals(up, new byte[]{0, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0})) fail("keyMessage(1,4): " + Arrays.toString(up));
+        else System.out.println("ok  key message up BACK");
+
+        var touch = sc.getDeclaredMethod("touchMessage", int.class, int.class, int.class, int.class, int.class);
+        touch.setAccessible(true);
+        int touchDown = sc.getField("TOUCH_DOWN").getInt(null);
+        byte[] m = (byte[]) touch.invoke(null, touchDown, 10, 20, 1280, 800);
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(m);
+        boolean ok = m.length == 32 && m[0] == 2 && m[1] == 0;
+        for (int i = 2; i <= 8 && ok; i++) ok = m[i] == (byte) 0xFF;
+        ok = ok && m[9] == (byte) 0xFE && b.getLong(2) == -2L
+                && b.getInt(10) == 10 && b.getInt(14) == 20
+                && (b.getShort(18) & 0xFFFF) == 1280 && (b.getShort(20) & 0xFFFF) == 800
+                && (b.getShort(22) & 0xFFFF) == 0xFFFF;
+        if (!ok) fail("touchMessage(DOWN,10,20,1280,800): " + Arrays.toString(m));
+        else System.out.println("ok  touch message");
     }
 
     static void fail(String why) { fails++; System.out.println("FAIL " + why); }

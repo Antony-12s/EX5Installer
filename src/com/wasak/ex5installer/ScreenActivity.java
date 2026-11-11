@@ -18,6 +18,7 @@ package com.wasak.ex5installer;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.os.Bundle;
@@ -34,6 +35,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.io.IOException;
@@ -69,6 +71,8 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private VideoView view;
+    private LinearLayout root, bar;
+    private FrameLayout videoArea;
     private TextView status;
     private Surface surface;
     private MediaCodec codec;
@@ -94,20 +98,21 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
 
         ui = new Handler(getMainLooper());
 
-        // Root: full-bleed themed background.
-        FrameLayout root = new FrameLayout(this);
+        // Root: full-bleed themed background. Video area + control bar side by side, so the
+        // buttons never cover the car picture: bar at the bottom in portrait, on the right in landscape.
+        root = new LinearLayout(this);
         root.setBackgroundColor(Ui.BG);
 
-        // Video: wrap-content + centre so the aspect-correct picture is letterboxed evenly,
-        // never dumped top-left. VideoView.onMeasure keeps the ratio; this just centres it.
+        // Video area: the aspect-correct picture is letterboxed and centred inside whatever space is left.
+        videoArea = new FrameLayout(this);
         view = new VideoView(this, null);
         view.getHolder().addCallback(this);
         FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         vlp.gravity = Gravity.CENTER;
-        root.addView(view, vlp);
+        videoArea.addView(view, vlp);
 
-        // Status pill: rounded translucent chip, top-centre, auto-hiding.
+        // Status pill: rounded translucent chip, top-centre of the video area, auto-hiding.
         status = new TextView(this);
         status.setTextColor(Ui.TEXT);
         status.setBackground(Ui.roundRect(this, 0xCC181D25, Ui.RADIUS_PILL, 0));
@@ -118,22 +123,74 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         slp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         slp.topMargin = Ui.dp(this, Ui.S4);
-        root.addView(status, slp);
+        videoArea.addView(status, slp);
+        root.addView(videoArea);
 
-        // Control bar: a single small translucent close pill, bottom-centre, above the video.
-        Button close = new Button(this);
-        close.setText("ปิด");
-        Ui.overlayPill(close);
-        close.setOnClickListener(v -> finish());
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        clp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        clp.bottomMargin = Ui.dp(this, Ui.S4);
-        root.addView(close, clp);
+        // Control bar: the car has no Back button, so Home/Back are sent as scrcpy key events.
+        bar = new LinearLayout(this);
+        int pad = Ui.dp(this, Ui.S2);
+        bar.setPadding(pad, pad, pad, pad);
+        bar.addView(barButton("Home", v -> sendKey(Scrcpy.KEY_HOME)));
+        bar.addView(barButton("ย้อนกลับ", v -> sendKey(Scrcpy.KEY_BACK)));
+        bar.addView(barButton("ปิด", v -> finish()));
+        root.addView(bar);
 
+        applyOrientation(getResources().getConfiguration().orientation);
         setContentView(root);
 
         view.setOnTouchListener(this::touched);
+    }
+
+    private Button barButton(String text, View.OnClickListener click) {
+        Button b = new Button(this);
+        b.setText(text);
+        Ui.secondary(b); // 52dp min height
+        int min = Ui.dp(this, 48);
+        b.setMinWidth(min);
+        b.setMinimumWidth(min);
+        b.setMinHeight(Math.max(min, Ui.dp(this, 52)));
+        b.setOnClickListener(click);
+        return b;
+    }
+
+    private void sendKey(int keycode) {
+        Scrcpy s = scrcpy;
+        if (s != null) io.submit(() -> s.key(keycode));
+    }
+
+    /**
+     * Portrait: video on top, bar row below. Landscape: video left, bar column on the right.
+     * Only orientations and LayoutParams change: the VideoView keeps its parent, so its surface survives.
+     */
+    private void applyOrientation(int orientation) {
+        boolean landscape = orientation == Configuration.ORIENTATION_LANDSCAPE;
+        int gap = Ui.dp(this, Ui.S2);
+        root.setOrientation(landscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        root.updateViewLayout(videoArea, landscape
+                ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        bar.setOrientation(landscape ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER);
+        root.updateViewLayout(bar, landscape
+                ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        for (int i = 0; i < bar.getChildCount(); i++) {
+            LinearLayout.LayoutParams lp = landscape
+                    ? new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                if (landscape) lp.topMargin = gap;
+                else lp.leftMargin = gap;
+            }
+            bar.updateViewLayout(bar.getChildAt(i), lp);
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (root != null) applyOrientation(newConfig.orientation);
+        goImmersive();
     }
 
     /** Hide the system bars, sticky so a swipe only reveals them briefly. */
@@ -255,18 +312,31 @@ public class ScreenActivity extends Activity implements SurfaceHolder.Callback {
      */
     private long framesFed;
 
+    private boolean slowWarned;
+
     private synchronized void feed(byte[] frame) {
         MediaCodec c = codec;
         if (c == null) return;
         try {
-            int in = c.dequeueInputBuffer(20_000);
+            // Never drop an access unit: every later P-frame references it, a gap shows as blocks
+            // until the next keyframe (seen on the real car). Drain output to free input slots instead.
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            long deadline = System.currentTimeMillis() + 1000;
+            int in = -1;
+            while (in < 0 && System.currentTimeMillis() < deadline) {
+                int out;
+                while ((out = c.dequeueOutputBuffer(info, 0)) >= 0) c.releaseOutputBuffer(out, true);
+                in = c.dequeueInputBuffer(10_000);
+            }
             if (in >= 0) {
                 ByteBuffer buf = c.getInputBuffer(in);
                 buf.clear();
                 buf.put(frame);
                 c.queueInputBuffer(in, 0, frame.length, ++framesFed * FRAME_US, 0);
+            } else if (!slowWarned) {
+                slowWarned = true;
+                say("ถอดภาพไม่ทัน");
             }
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             int out;
             while ((out = c.dequeueOutputBuffer(info, 0)) >= 0) c.releaseOutputBuffer(out, true);
         } catch (RuntimeException e) {
